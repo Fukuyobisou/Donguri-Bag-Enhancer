@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      8.13.16.2
+// @version      8.13.16.3
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
 // @contributor  ChatGPT (OpenAI, assistant)
@@ -22,7 +22,7 @@
   // ============================================================
   // スクリプト自身のバージョン（About 表示用）
   // ============================================================
-  const DBE_VERSION    = '8.13.16.2';
+  const DBE_VERSION    = '8.13.16.3';
 
   // ============================================================
   // 多重起動ガード（同一ページで DBE が複数注入される事故を防ぐ）
@@ -308,6 +308,7 @@
     ['氷縛のポールアックス',       { kana:'ヒョウバクノポールアックス',   limited:true  }],
     ['雹嵐チャクラム',             { kana:'ヒョウランチャクラム',         limited:true  }],
     ['真夜中氷河ランタン',         { kana:'マヨナカヒョウガランタン',     limited:true  }],
+    ['凍傷スリング',               { kana:'トウショウスリング',           limited:true  }],
   ]);
   // レジストリ（常設防具）
   const armorRegistry = new Map([
