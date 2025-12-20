@@ -6,8 +6,8 @@
 // @author       福呼び草
 // @contributor  ChatGPT (OpenAI, assistant)
 // @license      Non-Commercial Personal Use Only
-// @updateURL    https://github.com/bb97c8d2/Donguri_Bag_Enhancer/raw/main/Donguri_Bag_Enhancer.user.js
-// @downloadURL  https://github.com/bb97c8d2/Donguri_Bag_Enhancer/raw/main/Donguri_Bag_Enhancer.user.js
+// @updateURL    https://github.com/Fukuyobisou/Donguri_Bag_Enhancer/raw/main/Donguri_Bag_Enhancer.user.js
+// @downloadURL  https://github.com/Fukuyobisou/Donguri_Bag_Enhancer/raw/main/Donguri_Bag_Enhancer.user.js
 // @match        https://donguri.5ch.net/bag
 // @match        https://donguri.5ch.net/chest
 // @match        https://donguri.5ch.net/battlechest
