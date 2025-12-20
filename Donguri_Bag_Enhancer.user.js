@@ -5,7 +5,7 @@
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
 // @contributor  ChatGPT (OpenAI, assistant)
-// @license      Non-Commercial Personal Use Only
+// @license      BSD-3-Clause license
 // @updateURL    https://github.com/Fukuyobisou/Donguri_Bag_Enhancer/raw/main/Donguri_Bag_Enhancer.user.js
 // @downloadURL  https://github.com/Fukuyobisou/Donguri_Bag_Enhancer/raw/main/Donguri_Bag_Enhancer.user.js
 // @match        https://donguri.5ch.net/bag
