@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      8.13.16.3
+// @version      8.13.17.2
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
 // @contributor  ChatGPT (OpenAI, assistant)
@@ -22,7 +22,7 @@
   // ============================================================
   // スクリプト自身のバージョン（About 表示用）
   // ============================================================
-  const DBE_VERSION    = '8.13.16.3';
+  const DBE_VERSION    = '8.13.17.2';
 
   // ============================================================
   // 多重起動ガード（同一ページで DBE が複数注入される事故を防ぐ）
@@ -7520,9 +7520,29 @@
     for (const t of triplets){
       const table = document.getElementById(t.tableId);
       if (!table) continue;
+
+      // すでに目的の状態なら何もしない
+      // （フォーカス復帰/visibilitychange のたびに refreshSortingForTableId が走ると、
+      //  ソート状態やフィルタUIが作り直されて選択状態が解除されるため）
+      let has = false;
+      try{
+        if (typeof getHeaderIndexByKey === 'function'){
+          has = (getHeaderIndexByKey(table, t.itemKey) !== -1);
+        } else {
+          const thead = table.tHead || table.querySelector('thead');
+          has = !!(thead && thead.querySelector(`th.${t.itemKey}, th[data-colkey="${t.itemKey}"]`));
+        }
+      }catch(_){
+        has = false;
+      }
+
+      if (enabled && has) continue;
+      if (!enabled && !has) continue;
+
       if (enabled){ ensureItemIdColumn(table, t); }
       else        { removeItemIdColumn(table, t); }
-      // 追加：列構造が変わるため、ソートのバインドを現在の列順に再構成する
+
+      // 列構造が変わったときだけ、ソート等のヘッダー配線を再構成する
       try { refreshSortingForTableId(t.tableId); } catch(err){ console.warn('[DBE] refreshSortingForTableId failed:', err); }
     }
     // 残留オーバーレイがあれば除去（クリックブロック防止）
@@ -7554,7 +7574,7 @@
     }
     // 直近のソート状態をクリアしてから再ワイヤ
     try { if (lastSortMap && typeof lastSortMap === 'object') lastSortMap[id] = null; } catch {}
-    try { processTable(id); } catch{ console.warn('[DBE] processTable rebind failed:', e); }
+    try { processTable(id); } catch(e){ console.warn('[DBE] processTable rebind failed:', e); }
   }
 
   function getHeaderIndexByClass(table, klass){
@@ -7604,6 +7624,29 @@
     const txt = cell.textContent || '';
     const m2 = txt.match(/(\d+)/);
     return m2 ? m2[1] : null;
+  }
+
+  // ============================================================
+  // ▽ここから▽ Soft Reload Utilities（テーブル単位の再読込）
+  //  - /bag を fetch して対象 table の tbody だけを差し替える
+  //  - 既存のフィルタ/ソート状態は保持（UIは作り直さない）
+  // ============================================================
+  async function dbeFetchBagHtmlDocument(){
+    const url = location.href;
+    const res = await fetch(url, { credentials:'include', cache:'no-store' });
+    if (!res || !res.ok) throw new Error(`fetch failed: ${res ? res.status : 'no response'}`);
+    const html = await res.text();
+    return new DOMParser().parseFromString(html, 'text/html');
+  }
+
+  async function dbeSoftReloadTableTbody(tableId){
+    const table = document.getElementById(tableId);
+    if (!table || !table.tBodies || !table.tBodies[0]) return false;
+    const doc = await dbeFetchBagHtmlDocument();
+    const newTable = doc.getElementById(tableId);
+    if (!newTable || !newTable.tBodies || !newTable.tBodies[0]) return false;
+    table.tBodies[0].innerHTML = newTable.tBodies[0].innerHTML;
+    return true;
   }
 
   // ============================================================
@@ -8483,8 +8526,68 @@
       rowButtons.style.margin = '0px';
 
       const chks=[];
+      async function dbeSoftReloadThisNecklaceTable(btn){
+        let oldText = '';
+        try{
+          if (table.dataset.dbeSoftReloading === '1') return;
+          table.dataset.dbeSoftReloading = '1';
+          oldText = btn ? btn.textContent : '';
+          if (btn){ btn.disabled = true; btn.textContent = '更新中...'; }
+
+          const ok = await dbeSoftReloadTableTbody(id);
+          if (!ok) throw new Error('tbody reload failed');
+
+          // 設定（dbe-W-Settings）：「ネックレス、武器、防具の装備種とクラスを隠す」を再適用
+          // ※tbody差し替え後は、名称セルの2行目（装備種/クラス）の表示状態が初期状態に戻るため
+          try{
+            const hide = (typeof readBool === 'function') ? readBool('hideKindClass') : false;
+            if (typeof toggleNameSubLine === 'function') toggleNameSubLine(hide);
+          }catch(_){}
+
+          // 増減列が有効な場合、tbody差し替え後に増減セルを再構築（新規行に追加）
+          const __showDeltaNow = (typeof readBool === 'function') ? readBool('showDelta') : true;
+          const hasDeltaHeader = !!(table.tHead && table.tHead.rows && table.tHead.rows[0] && table.tHead.rows[0].querySelector('th.'+deltaColClass));
+          if (__showDeltaNow && hasDeltaHeader){
+            // 念のため：既存の増減セルを除去してから再生成
+            try{ table.querySelectorAll('td.'+deltaColClass).forEach(el=>el.remove()); }catch(_){}
+            const _buff   = Array.isArray(buffKeywords)   ? buffKeywords   : [];
+            const _debuff = Array.isArray(debuffKeywords) ? debuffKeywords : [];
+            Array.from(table.tBodies[0].rows).forEach(row=>{
+              const td = document.createElement('td');
+              td.classList.add(deltaColClass);
+              td.style.textAlign='center';
+              const tdRef = row.cells[pos] || null;
+              tdRef ? row.insertBefore(td, tdRef) : row.appendChild(td);
+              let tot = 0;
+              const attrCell = row.cells[attrIdx];
+              if (attrCell){
+                attrCell.querySelectorAll('li').forEach(li=>{
+                  const m = (li.textContent||'').trim().match(/(\d+)%\s*(.+)$/);
+                  if (!m) return;
+                  const v = +m[1], k = m[2].trim();
+                  tot += _buff.includes(k) ? v : (_debuff.includes(k) ? -v : 0);
+                });
+              }
+              td.textContent = tot>0? ('△'+tot) : (tot<0? ('▼'+Math.abs(tot)) : '0');
+            });
+          }
+
+          // フィルター＆（必要なら）最後のソートを再適用
+          applyFilter();
+        }catch(err){
+          console.warn('[DBE] soft reload necklaceTable failed:', err);
+          location.reload();
+        }finally{
+          try{ delete table.dataset.dbeSoftReloading; }catch(_){ table.dataset.dbeSoftReloading=''; }
+          if (btn){
+            btn.disabled = false;
+            btn.textContent = oldText || '再読込';
+          }
+        }
+      }
+
       [['全解除',()=>{ chks.forEach(c=>c.checked=false); if (idChk) idChk.checked=false; applyFilter(); }],
-        ['再読込',()=>{ chks.forEach(c=>c.checked=false); if (idChk) idChk.checked=false; applyFilter(); }]]
+        ['再読込',(ev)=>{ Promise.resolve(dbeSoftReloadThisNecklaceTable(ev && ev.currentTarget)).catch(_=>{}); }]]
         .forEach(([t,fn])=>{
           const b=document.createElement('button');
           b.textContent=t;
@@ -9004,10 +9107,43 @@
         ui.style.margin='0px';
         table.insertAdjacentElement('beforebegin',ui);
       }
+
+      async function dbeSoftReloadThisWeaponArmorTable(btn){
+        let oldText = '';
+        try{
+          if (table.dataset.dbeSoftReloading === '1') return;
+          table.dataset.dbeSoftReloading = '1';
+          oldText = btn ? btn.textContent : '';
+          if (btn){ btn.disabled = true; btn.textContent = '更新中...'; }
+
+          const ok = await dbeSoftReloadTableTbody(id);
+          if (!ok) throw new Error('tbody reload failed');
+
+          // 設定（dbe-W-Settings）：「ネックレス、武器、防具の装備種とクラスを隠す」を再適用
+          // ※tbody差し替え後は、名称セルの2行目（装備種/クラス）の表示状態が初期状態に戻るため
+          try{
+            const hide = (typeof readBool === 'function') ? readBool('hideKindClass') : false;
+            if (typeof toggleNameSubLine === 'function') toggleNameSubLine(hide);
+          }catch(_){}
+
+          // フィルター＆最後のソートを維持したまま再適用
+          applyFilter();
+        }catch(err){
+          console.warn('[DBE] soft reload '+id+' failed:', err);
+          location.reload();
+        }finally{
+          try{ delete table.dataset.dbeSoftReloading; }catch(_){ table.dataset.dbeSoftReloading=''; }
+          if (btn){
+            btn.disabled = false;
+            btn.textContent = oldText || '再読込';
+          }
+        }
+      }
+
       const r2=document.createElement('div');
       r2.style.marginTop='4px';
       [['全解除',()=>{setAll(false);try{delete table.dataset.dbeNamePick;}catch(_){table.dataset.dbeNamePick='';}applyFilter();applyColor();}],
-        ['再読込',()=>location.reload()]].forEach(([txt,fn])=>{
+        ['再読込',(ev)=>{ Promise.resolve(dbeSoftReloadThisWeaponArmorTable(ev && ev.currentTarget)).catch(_=>{}); }]].forEach(([txt,fn])=>{
         const b=document.createElement('button');
         b.textContent=txt;
         Object.assign(b.style,{fontSize:'0.9em',padding:'4px 8px',margin:'10px'});
