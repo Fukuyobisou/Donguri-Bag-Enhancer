@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      8.13.17.5
+// @version      8.13.18.6
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
 // @contributor  ChatGPT (OpenAI, assistant)
@@ -22,7 +22,7 @@
   // ============================================================
   // スクリプト自身のバージョン（About 表示用）
   // ============================================================
-  const DBE_VERSION    = '8.13.17.5';
+  const DBE_VERSION    = '8.13.18.6';
 
   // ============================================================
   // 多重起動ガード（同一ページで DBE が複数注入される事故を防ぐ）
@@ -468,6 +468,71 @@
 
   // --- 最後に使用したソート関数を記憶するマップ（先に初期化） ---
   const lastSortMap = {};
+
+  // --- ソート履歴（安定ソートの多段復元用） ---
+  const lastSortHistoryMap = {};
+  const DBE_MAX_SORT_HISTORY = 12;
+
+  function dbeClearSortHistory(id){
+    try{ if (lastSortMap && typeof lastSortMap === 'object') lastSortMap[id] = null; }catch(_){}
+    try{ lastSortHistoryMap[id] = []; }catch(_){}
+  }
+
+  function dbeRememberSort(id, fn, key){
+    try{
+      if (!fn || typeof fn !== 'function') return;
+      // 直近（単発）も保持
+      if (lastSortMap && typeof lastSortMap === 'object') lastSortMap[id] = fn;
+
+      // 履歴（多段）も保持
+      if (!Array.isArray(lastSortHistoryMap[id])) lastSortHistoryMap[id] = [];
+      const arr = lastSortHistoryMap[id];
+
+      // key 指定がある場合：同一キー（＝同一列）の過去履歴を除去して「最後の方向」だけを採用
+      if (key != null) {
+        for (let i = arr.length - 1; i >= 0; i--) {
+          const it = arr[i];
+          const itKey = (typeof it === 'function') ? null : (it && typeof it === 'object' ? it.key : null);
+          if (itKey === key) arr.splice(i, 1);
+        }
+        arr.push({ key, fn });
+      } else {
+        // 互換：key 無しは従来通り（クリック履歴を積む）
+        arr.push(fn);
+      }
+
+      if (arr.length > DBE_MAX_SORT_HISTORY) {
+        arr.splice(0, arr.length - DBE_MAX_SORT_HISTORY);
+      }
+    }catch(e){
+      console.warn('[DBE] rememberSort failed:', e);
+    }
+  }
+
+  function dbeApplySortHistory(id){
+    try{
+      const arr = lastSortHistoryMap[id];
+      if (Array.isArray(arr) && arr.length){
+        // 安定ソート前提：古い順に適用すると、後のソートほど優先度が高くなる
+        arr.forEach(it => {
+          try{
+            if (typeof it === 'function') { it(); return; }
+            if (it && typeof it === 'object' && typeof it.fn === 'function') { it.fn(); return; }
+          }catch(e){
+            console.warn('[DBE] applySortHistory step failed:', e);
+          }
+        });
+        return true;
+      }
+      if (typeof lastSortMap[id] === 'function') {
+        lastSortMap[id]();
+        return true;
+      }
+    }catch(e){
+      console.warn('[DBE] applySortHistory failed:', e);
+    }
+    return false;
+  }
 
   // --- 最後にソートされた列と方向を記憶 ---
   let lastSortedColumn  = null;  // 最後にソートされた列の class 名 (columnIds のいずれか)
@@ -7539,7 +7604,18 @@
         has = false;
       }
 
-      if (enabled && has) continue;
+      // thead に ID 列があるのに tbody 側が欠けている（＝列ズレが起きる）ケースだけ補修して抜ける
+      if (enabled && has){
+        try{
+          const idx = (typeof getHeaderIndexByKey === 'function') ? getHeaderIndexByKey(table, t.itemKey) : -1;
+          const r0  = (table.tBodies && table.tBodies[0] && table.tBodies[0].rows) ? table.tBodies[0].rows[0] : null;
+          const okBody = !r0 || (idx >= 0 && r0.cells && r0.cells[idx] && r0.cells[idx].classList && r0.cells[idx].classList.contains(t.itemKey));
+          if (!okBody){
+            ensureItemIdColumn(table, t); // thead は既にある前提で tbody を同期
+          }
+        }catch(_){}
+        continue;
+      }
       if (!enabled && !has) continue;
 
       if (enabled){ ensureItemIdColumn(table, t); }
@@ -7576,7 +7652,7 @@
       }
     }
     // 直近のソート状態をクリアしてから再ワイヤ
-    try { if (lastSortMap && typeof lastSortMap === 'object') lastSortMap[id] = null; } catch {}
+    try { dbeClearSortHistory(id); } catch {}
     try { processTable(id); } catch(e){ console.warn('[DBE] processTable rebind failed:', e); }
   }
 
@@ -7805,41 +7881,60 @@
     const thead = table.tHead || table.querySelector('thead');
     const tbody = table.tBodies?.[0] || table.querySelector('tbody');
     if (!thead || !tbody) return;
-    // 既に挿入済みなら何もしない
-    if (getHeaderIndexByKey(table, itemKey) !== -1) return;
+    const trh = thead.rows[0];
+    if (!trh) return;
 
-    const nameIdx = getHeaderIndexByClass(table, nameKey);
-    const equpIdx = getHeaderIndexByClass(table, equpKey);
-    if (nameIdx < 0 || equpIdx < 0) return;
+    // thead に既に ID 列がある場合は、その位置に tbody を同期する（再読込直後の列ズレ対策）
+    let insertAt = -1;
+    try{
+      insertAt = getHeaderIndexByKey(table, itemKey);
+    }catch(_){
+      insertAt = -1;
+    }
 
-    const insertAt = nameIdx + 1; // 名称直後（＝名称と装備の間）
+    if (insertAt === -1){
+      const nameIdx = getHeaderIndexByClass(table, nameKey);
+      const equpIdx = getHeaderIndexByClass(table, equpKey);
+      if (nameIdx < 0 || equpIdx < 0) return;
+
+      insertAt = nameIdx + 1; // 名称直後（＝名称と装備の間）
+
+      // ヘッダに TH を挿入
+      const th = createTh(itemKey, 'ID');
+      // ← 追加：他ヘッダーの色をコピーして、中央寄せにする
+      try {
+        // 自分以外の既存ヘッダー（なければ先頭TH）を参照
+        const ref = trh.querySelector(`th:not([data-colkey="${itemKey}"])`) || trh.querySelector('th');
+          if (ref) {
+          const cs = getComputedStyle(ref);
+          th.style.backgroundColor = cs.backgroundColor;
+          th.style.color = cs.color;
+          // もし他ヘッダーが左右や上下の余白/枠線を指定していれば、必要に応じて下記を有効化
+          // th.style.border = cs.border;
+          // th.style.padding = cs.padding;
+        }
+        th.style.textAlign = 'center';
+      } catch { th.style.textAlign = 'center'; }
+      trh.insertBefore(th, trh.children[insertAt] || null);
+    }
+
     // テーブルIDから kind を判定（ネックレス／武器／防具）
     const kind =
       (table.id === 'necklaceTable') ? 'nec' :
       (table.id === 'weaponTable')   ? 'wep' :
       (table.id === 'armorTable')    ? 'amr' : null;
 
-    // ヘッダに TH を挿入
-    const trh = thead.rows[0];
-    const th = createTh(itemKey, 'ID');
-    // ← 追加：他ヘッダーの色をコピーして、中央寄せにする
-    try {
-      // 自分以外の既存ヘッダー（なければ先頭TH）を参照
-      const ref = trh.querySelector(`th:not([data-colkey="${itemKey}"])`) || trh.querySelector('th');
-        if (ref) {
-        const cs = getComputedStyle(ref);
-        th.style.backgroundColor = cs.backgroundColor;
-        th.style.color = cs.color;
-        // もし他ヘッダーが左右や上下の余白/枠線を指定していれば、必要に応じて下記を有効化
-        // th.style.border = cs.border;
-        // th.style.padding = cs.padding;
-      }
-      th.style.textAlign = 'center';
-    } catch { th.style.textAlign = 'center'; }
-    trh.insertBefore(th, trh.children[insertAt] || null);
-
     // ボディに TD を挿入。実IDの抽出はクリック時（makeCopyBtn）に行う。
     for (const tr of Array.from(tbody.rows)){
+      // すでに正しい位置に存在するなら何もしない
+      try{
+        if (insertAt >= 0 && tr.children[insertAt] && tr.children[insertAt].classList && tr.children[insertAt].classList.contains(itemKey)) continue;
+      }catch(_){}
+
+      // 位置ズレも含め、既存の ID セルがあれば一旦除去
+      try{
+        tr.querySelectorAll(`td.${itemKey}, td[data-colkey="${itemKey}"]`).forEach(el=>el.remove());
+      }catch(_){}
       const td = document.createElement('td');
       td.dataset.colkey = itemKey;
       td.classList.add(itemKey);
@@ -8318,7 +8413,7 @@
     const headerRow = table.tHead.rows[0];
     const hdrs = Array.from(headerRow.cells);
     // テーブルごとにソート関数初期化
-    lastSortMap[id] = null;
+    dbeClearSortHistory(id);
 
     // ヘッダー整形
     hdrs.forEach(th=>{
@@ -8337,13 +8432,15 @@
     // 〓〓〓〓〓 名称ヘッダー（武器/防具）に 4段階サイクルソートをワイヤリング 〓〓〓〓〓
     wireNameColumnSort(table, id, idxMap, hdrs, headerRow);
 
-    // 〓〓〓〓〓 「解」列ヘッダークリックで4フェーズ3段ソート（解／ランク／マリモ） 〓〓〓〓〓
+    // 〓〓〓〓〓 「解」列ヘッダークリック：2段階（昇順/降順）＋インジケーターは右固定 〓〓〓〓〓
     const lockIdx = idxMap['解'];
     if (lockIdx != null) {
       const th = hdrs[lockIdx];
       th.style.cursor = 'pointer';
-      // テーブル別に管理するソートフェーズ
-      let lockState = 0;  // 0→①, 1→②, 2→③, 3→④
+
+      // ソート状態: true=逆順, false=正順（インジケーターは右固定）
+      let lockDesc = true;
+
       // 共通：マリモ列インデックス
       const mrimIdx = idxMap['マリモ'];
       // テーブル別：ランク／レアリティ列インデックス
@@ -8353,10 +8450,10 @@
         ? idxMap['武器']
         : idxMap['防具'];
 
-      th.addEventListener('click', () => {
+      const sortByUnlock = (desc) => {
         const rows = Array.from(table.tBodies[0].rows);
-        rows.sort((a, b) => {
-          // 1) 解リンク順 (secrOrder)
+        rows.sort((a,b)=>{
+          // 1) 解リンク順
           const aKey = a.cells[lockIdx].hasAttribute('secured') ? 'secured'
                       : a.cells[lockIdx].hasAttribute('released') ? 'released'
                       : null;
@@ -8365,6 +8462,7 @@
                       : null;
           const aSec = secrOrder[aKey] ?? 0;
           const bSec = secrOrder[bKey] ?? 0;
+
           // 2) ランク or レアリティ
           const aRank = id === 'necklaceTable'
             ? (gradeOrder[(a.cells[nameIdx].textContent.match(/Pt|Au|Ag|CuSn|Cu/)||['Cu'])[0]] || 0)
@@ -8372,31 +8470,33 @@
           const bRank = id === 'necklaceTable'
             ? (gradeOrder[(b.cells[nameIdx].textContent.match(/Pt|Au|Ag|CuSn|Cu/)||['Cu'])[0]] || 0)
             : (rarityOrder[(dbePickRarityFromText(b.cells[nameIdx].textContent) || 'N')] || 0);
+
           // 3) マリモ値
           const aMr = parseInt(a.cells[mrimIdx].textContent.replace(/\D/g,''),10) || 0;
           const bMr = parseInt(b.cells[mrimIdx].textContent.replace(/\D/g,''),10) || 0;
 
-          let diff = 0;
-          switch (lockState) {
-            // ① 解逆 → ランク正 → マリモ正
-            case 0: diff = (bSec - aSec) || (aRank - bRank) || (aMr - bMr); break;
-            // ② 解逆 → ランク逆 → マリモ逆
-            case 1: diff = (bSec - aSec) || (bRank - aRank) || (bMr - aMr); break;
-            // ③ 解正 → ランク正 → マリモ正
-            case 2: diff = (aSec - bSec) || (aRank - bRank) || (aMr - bMr); break;
-            // ④ 解正 → ランク逆 → マリモ逆
-            case 3: diff = (aSec - bSec) || (bRank - aRank) || (bMr - aMr); break;
-          }
-          return diff;
+          // 「解→ランク→マリモ」を、全体として昇順/降順の2択に統一
+          return desc
+            ? ((bSec - aSec) || (bRank - aRank) || (bMr - aMr))
+            : ((aSec - bSec) || (aRank - bRank) || (aMr - bMr));
         });
+
         // 行を再描画
         rows.forEach(r => table.tBodies[0].appendChild(r));
-        // 矢印表示：①②は右、③④は左
-        const arrow = (lockState % 2 === 0) ? '⬆' : '⬇';
-        const pos   = (lockState < 2) ? 'right' : 'left';
-        updateSortIndicator(th, arrow, pos);
-        // 次フェーズへ
-        lockState = (lockState + 1) % 4;
+
+        // インジケーターは右固定
+        updateSortIndicator(th, desc ? '⬆' : '⬇', 'right');
+      };
+
+      th.addEventListener('click', () => {
+        const appliedDesc = lockDesc;
+        sortByUnlock(appliedDesc);
+
+        // 「再読込」後の再適用用として履歴に登録（同一列キーは最後の方向だけ残す）
+        dbeRememberSort(id, () => sortByUnlock(appliedDesc), 'KAI');
+
+        // 次回クリックは反転
+        lockDesc = !lockDesc;
         scrollToAnchorCell();
       });
     }
@@ -8485,18 +8585,16 @@
 
       dTh.addEventListener('click', () => {
         // 現在のクリックで適用される方向でソートし、記憶
-        sortByDelta(ascNum);
-        necklaceLastSortDirection = ascNum;
-        // 再適用用として lastSortMap に登録
-        lastSortMap[id] = () => {
-          if (necklaceLastSortDirection == null) return;
-          sortByDelta(necklaceLastSortDirection);
-        };
+        const appliedDir = ascNum;
+        sortByDelta(appliedDir);
+        necklaceLastSortDirection = appliedDir;
+        // 再適用用（＆多段復元の履歴）として登録
+        dbeRememberSort(id, () => sortByDelta(appliedDir), 'DELTA');
         // 次回クリックは反転
-        ascNum = !ascNum;
+        ascNum = !appliedDir;
       });
       } else {
-        try{ if (lastSortMap && typeof lastSortMap==='object') lastSortMap[id] = null; }catch(_){}
+        try{ dbeClearSortHistory(id); }catch(_){}
       }
 
       // 〓〓〓〓〓 フィルター UI 〓〓〓〓〓
@@ -8547,6 +8645,15 @@
             if (typeof toggleNameSubLine === 'function') toggleNameSubLine(hide);
           }catch(_){}
 
+          // 設定（dbe-W-Settings）：「名称列と装備列の間にアイテムIDを表示する」を再適用
+          // ※theadにID列が残っている状態でtbodyを差し替えると、tbody側にIDセルが存在せず列ズレが起きる
+          try{
+            const showId = (typeof readBool === 'function') ? readBool('displayItemId') : false;
+            if (showId){
+              ensureItemIdColumn(table, { itemKey:'necClm-ItemID', nameKey:'necClm-Name', equpKey:'necClm-Equp' });
+            }
+          }catch(_){}
+
           // 増減列が有効な場合、tbody差し替え後に増減セルを再構築（新規行に追加）
           const __showDeltaNow = (typeof readBool === 'function') ? readBool('showDelta') : true;
           const hasDeltaHeader = !!(table.tHead && table.tHead.rows && table.tHead.rows[0] && table.tHead.rows[0].querySelector('th.'+deltaColClass));
@@ -8577,6 +8684,7 @@
 
           // フィルター＆（必要なら）最後のソートを再適用
           applyFilter();
+          try{ applyCellColors(); }catch(_){}
         }catch(err){
           console.warn('[DBE] soft reload necklaceTable failed:', err);
           location.reload();
@@ -8700,11 +8808,11 @@
           }
           r.style.display = visible ? '' : 'none';
         });
-        scrollToAnchorCell();
-        // フィルター後：最後に記憶したソートを再適用
-        if (lastSortMap[id]) lastSortMap[id]();
       }
       applyFilter();
+        // フィルター後：保存済みのソート履歴（多段）を再適用
+      dbeApplySortHistory(id);
+      scrollToAnchorCell();
     }
 
 // 〓〓〓〓〓 weaponTable 固有 〓〓〓〓〓
@@ -8714,14 +8822,14 @@
       const atkIdx = idxMap['ATK'];
       const mrimIdx = idxMap['マリモ'];
       const atkTh = headerRow.cells[atkIdx];
-      // ATK列ソート用の状態を管理
+      // ATK列ソート用の状態を管理（4段階）
       let atkState = 0;
       atkTh.style.cursor = 'pointer';
-      atkTh.addEventListener('click', () => {
+      const sortByAtk = (state) => {
         const rows = Array.from(table.tBodies[0].rows);
         // 既存のインジケーターを全列から削除
         headerRow.querySelectorAll('.sort-indicator, .sort-indicator-left').forEach(el => el.remove());
-        switch (atkState) {
+        switch (state) {
           // (1) 最高ATK値による逆順
           case 0:
             rows.sort((a, b) =>
@@ -8760,6 +8868,15 @@
             break;
         }
         rows.forEach(r => table.tBodies[0].appendChild(r));
+      };
+
+      atkTh.addEventListener('click', () => {
+        const appliedState = atkState;
+        sortByAtk(appliedState);
+
+        // フィルター／再読込後の再適用用として lastSortMap に登録
+        dbeRememberSort(id, () => sortByAtk(appliedState), 'ATK');
+
         atkState = (atkState + 1) % 4;
         scrollToAnchorCell();
       });
@@ -8794,7 +8911,7 @@
         sortBySpd(appliedDesc);
 
         // 再適用用として lastSortMap に登録
-        lastSortMap[id] = () => sortBySpd(appliedDesc);
+        dbeRememberSort(id, () => sortBySpd(appliedDesc), 'SPD');
 
         // 次回クリックは反転
         spdDesc = !spdDesc;
@@ -8831,7 +8948,7 @@
         sortByCrit(appliedDesc);
 
         // フィルター後の再適用用として lastSortMap に登録
-        lastSortMap[id] = () => sortByCrit(appliedDesc);
+        dbeRememberSort(id, () => sortByCrit(appliedDesc), 'CRIT');
 
         // 次回クリックは反転
         critDesc = !critDesc;
@@ -8868,7 +8985,7 @@
         sortByMod(appliedDesc);
 
         // フィルター後の再適用用として lastSortMap に登録
-        lastSortMap[id] = () => sortByMod(appliedDesc);
+        ByMod(appliedDesc);
 
         // 次回クリックは反転
         modDesc = !modDesc;
@@ -8883,7 +9000,7 @@
       // マリモ列ソート用フラグ
       let rrimDesc = true;
       rrimTh.style.cursor = 'pointer';
-      rrimTh.addEventListener('click', () => {
+      const sortByRrim = (desc) => {
         const rows = Array.from(table.tBodies[0].rows);
         // 既存の矢印をクリア
         headerRow.querySelectorAll('.sort-indicator, .sort-indicator-left').forEach(el => el.remove());
@@ -8891,11 +9008,20 @@
         rows.sort((a, b) => {
           const aVal = parseInt(a.cells[rrimIdx].textContent.replace(/\D/g, ''), 10) || 0;
           const bVal = parseInt(b.cells[rrimIdx].textContent.replace(/\D/g, ''), 10) || 0;
-          return rrimDesc ? bVal - aVal : aVal - bVal;
+          return desc ? bVal - aVal : aVal - bVal;
         });
         rows.forEach(r => table.tBodies[0].appendChild(r));
         // 矢印表示：右隣に⬆／⬇
-        updateSortIndicator(rrimTh, rrimDesc ? '⬆' : '⬇', 'right');
+        updateSortIndicator(rrimTh, desc ? '⬆' : '⬇', 'right');
+      };
+
+      rrimTh.addEventListener('click', () => {
+        const appliedDesc = rrimDesc;
+        sortByRrim(appliedDesc);
+
+        // フィルター／再読込後の再適用用として lastSortMap に登録
+        dbeRememberSort(id, () => sortByRrim(appliedDesc), 'MRIM');
+
         rrimDesc = !rrimDesc;
         scrollToAnchorCell();
       });
@@ -8906,14 +9032,14 @@
       const defIdx = idxMap['DEF'];
       const mrimIdx = idxMap['マリモ'];
       const defTh = headerRow.cells[defIdx];
-      // DEF列ソート用の状態を管理
+      // DEF列ソート用の状態を管理（4段階）
       let defState = 0;
       defTh.style.cursor = 'pointer';
-      defTh.addEventListener('click', () => {
+      const sortByDef = (state) => {
         const rows = Array.from(table.tBodies[0].rows);
         // 既存のインジケーターを全列から削除
         headerRow.querySelectorAll('.sort-indicator, .sort-indicator-left').forEach(el => el.remove());
-        switch (defState) {
+        switch (state) {
           // (1) 最高DEF値による逆順
           case 0:
             rows.sort((a, b) =>
@@ -8952,6 +9078,15 @@
             break;
         }
         rows.forEach(r => table.tBodies[0].appendChild(r));
+      };
+
+      defTh.addEventListener('click', () => {
+        const appliedState = defState;
+        sortByDef(appliedState);
+
+        // フィルター／再読込後の再適用用として lastSortMap に登録
+        dbeRememberSort(id, () => sortByDef(appliedState), 'DEF');
+
         defState = (defState + 1) % 4;
         scrollToAnchorCell();
       });
@@ -8986,7 +9121,7 @@
         sortByWt(appliedDesc);
 
         // フィルター後の再適用用として lastSortMap に登録
-        lastSortMap[id] = () => sortByWt(appliedDesc);
+        dbeRememberSort(id, () => sortByWt(appliedDesc), 'WT');
 
         // 次回クリックは反転
         wgtDesc = !wgtDesc;
@@ -9023,7 +9158,7 @@
         sortByCrit(appliedDesc);
 
         // フィルター後の再適用用として lastSortMap に登録
-        lastSortMap[id] = () => sortByCrit(appliedDesc);
+        dbeRememberSort(id, () => sortByCrit(appliedDesc), 'CRIT');
 
         // 次回クリックは反転
         critDesc = !critDesc;
@@ -9060,7 +9195,7 @@
         sortByMod(appliedDesc);
 
         // フィルター後の再適用用として lastSortMap に登録
-        lastSortMap[id] = () => sortByMod(appliedDesc);
+        dbeRememberSort(id, () => sortByMod(appliedDesc), 'MOD');
 
         // 次回クリックは反転
         modDesc = !modDesc;
@@ -9075,16 +9210,25 @@
       // マリモ列ソート用フラグ
       let mrimDesc = true;
       mrimTh.style.cursor = 'pointer';
-      mrimTh.addEventListener('click', () => {
+      const sortByMrim = (desc) => {
         const rows = Array.from(table.tBodies[0].rows);
         headerRow.querySelectorAll('.sort-indicator, .sort-indicator-left').forEach(el => el.remove());
         rows.sort((a, b) => {
           const aVal = parseInt(a.cells[mrimIdx].textContent.replace(/\D/g, ''), 10) || 0;
           const bVal = parseInt(b.cells[mrimIdx].textContent.replace(/\D/g, ''), 10) || 0;
-          return mrimDesc ? bVal - aVal : aVal - bVal;
+          return desc ? bVal - aVal : aVal - bVal;
         });
         rows.forEach(r => table.tBodies[0].appendChild(r));
-        updateSortIndicator(mrimTh, mrimDesc ? '⬆' : '⬇', 'right');
+        updateSortIndicator(mrimTh, desc ? '⬆' : '⬇', 'right');
+      };
+
+      mrimTh.addEventListener('click', () => {
+        const appliedDesc = mrimDesc;
+        sortByMrim(appliedDesc);
+
+        // フィルター／再読込後の再適用用として lastSortMap に登録
+        dbeRememberSort(id, () => sortByMrim(appliedDesc), 'MRIM');
+
         mrimDesc = !mrimDesc;
         scrollToAnchorCell();
       });
@@ -9129,8 +9273,23 @@
             if (typeof toggleNameSubLine === 'function') toggleNameSubLine(hide);
           }catch(_){}
 
+          // 設定（dbe-W-Settings）：「名称列と装備列の間にアイテムIDを表示する」を再適用
+          // ※theadにID列が残っている状態でtbodyを差し替えると、tbody側にIDセルが存在せず列ズレが起きる
+          try{
+            const showId = (typeof readBool === 'function') ? readBool('displayItemId') : false;
+            if (showId){
+              const t =
+                (id === 'weaponTable') ? { itemKey:'wepClm-ItemID', nameKey:'wepClm-Name', equpKey:'wepClm-Equp' } :
+                (id === 'armorTable')  ? { itemKey:'amrClm-ItemID', nameKey:'amrClm-Name', equpKey:'amrClm-Equp' } :
+                null;
+              if (t) ensureItemIdColumn(table, t);
+            }
+          }catch(_){}
+
           // フィルター＆最後のソートを維持したまま再適用
           applyFilter();
+          try{ applyColor(); }catch(_){}
+          try{ applyCellColors(); }catch(_){}
         }catch(err){
           console.warn('[DBE] soft reload '+id+' failed:', err);
           location.reload();
@@ -9277,13 +9436,9 @@
           row.style.display = (okR && okE && okId && okN) ? '' : 'none';
         });
 
-        // フィルター後：最後にソートされた列と方向を参照して再ソート
-        if (lastSortedColumn !== null && lastSortAscending !== null) {
-          if (typeof lastSortMap[id] === 'function') {
-            lastSortMap[id]();
-          }
-        }
         applyColor();
+        // フィルター後：保存済みのソート履歴（多段）を再適用
+        dbeApplySortHistory(id);
         scrollToAnchorCell();
       }
 
@@ -9354,11 +9509,11 @@
         updateSortIndicator(hdrs[elemCol], elemState === 0 ? '⬆' : '⬇', 'right');
         // ソート状態を保存
         const lastState = elemState;
-        lastSortMap[id] = () => {
+        dbeRememberSort(id, () => {
           multiSort(lastState === 0);
           updateSortIndicator(hdrs[elemCol], lastState === 0 ? '⬆' : '⬇', 'right');
           applyColor(); scrollToAnchorCell();
-        };
+        }, 'ELEM');
         elemState = elemState === 0 ? 1 : 0;
         applyColor();
         scrollToAnchorCell();
@@ -9648,7 +9803,7 @@
         nameSortPhase = (nameSortPhase + 1) % 4;
         table.dataset.nameSortPhase = String(nameSortPhase);
         // 再適用は「直近適用済み」を優先（別処理で dataset が変化しても安定）
-        lastSortMap[id] = ()=>applyCycleSort(Number((table.dataset.nameSortLastApplied||'name:0').split(':')[1]));
+        dbeRememberSort(id, ()=>applyCycleSort(Number((table.dataset.nameSortLastApplied||'name:0').split(':')[1])), 'NAME');
       });
 
       // 〓〓〓〓〓〓 テーブルソート状態の記憶 〓〓〓〓〓〓
@@ -9671,9 +9826,10 @@
                 if (elm[rk]) elm[rk].checked = (rk === clicked);
               });
             }
-            applyFilter();applyColor();
-            // 最後に記憶したソート状態（6段階サイクル等）があれば再適用
-            if (typeof lastSortMap[id] === 'function') lastSortMap[id]();
+            applyColor();
+            applyFilter();
+            // フィルター後：保存済みのソート履歴（多段）を再適用
+            dbeApplySortHistory(id);
             scrollToAnchorCell();
           });
         });
