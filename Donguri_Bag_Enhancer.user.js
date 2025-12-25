@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      8.13.18.6
+// @version      8.13.19.1
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
 // @contributor  ChatGPT (OpenAI, assistant)
@@ -22,7 +22,7 @@
   // ============================================================
   // スクリプト自身のバージョン（About 表示用）
   // ============================================================
-  const DBE_VERSION    = '8.13.18.6';
+  const DBE_VERSION    = '8.13.19.1';
 
   // ============================================================
   // 多重起動ガード（同一ページで DBE が複数注入される事故を防ぐ）
@@ -353,6 +353,7 @@
     ['氷霜のシュラウド',           { kana:'ヒョウソウノシュラウド',       limited:true  }],
     ['雪崩の甲殻',                 { kana:'ナダレノコウカク',             limited:true  }],
     ['ツンドラ守護者の胴衣',       { kana:'ツンドラシュゴシャノドウイ',   limited:true  }],
+    ['極光の冠兜',                 { kana:'キョッコウノカンムリカブト',   limited:true  }]    
   ]);
 
   // ============================================================
@@ -565,7 +566,6 @@
     replaceTreasureLinks();
     insertItemSummary();
 
-    // 〓〓〓〓〓〓 装備中アイテム見出し＆テーブルID付与 〓〓〓〓〓〓
     (function insertEquippedSection(){
       const header = document.querySelector('header');
       if (!header) return;
@@ -593,6 +593,24 @@
             h3.remove();
             return;
           }
+
+          // ★(2.5) 装備中テーブルの ELEM 列（/属性列）を着色
+          function applyColor(){
+            try{
+              const body = table.tBodies && table.tBodies[0];
+              if (!body) return;
+              const elemIdx = findHeaderIndexByText(table, ['ELEM','属性','Elem','Element','属性/Element']);
+              if (elemIdx < 0) return;
+              Array.from(body.rows).forEach(r=>{
+                const td = r.cells[elemIdx];
+                if (!td) return;
+                const raw = (td.textContent || '').trim();
+                const elem = (raw.match(/[^\d]+$/) || ['なし'])[0].trim();
+                td.style.backgroundColor = elemColors[elem] || '';
+              });
+            }catch(_){}
+          }
+
           // ★(2) テキストに応じて ID を振る
           if (text.includes('ネックレス')) {
             table.id = 'necklaceEquipped';
@@ -601,6 +619,7 @@
           } else if (text.includes('武器')) {
             table.id = 'weaponEquipped';
           }
+          applyColor();
         // 見出し自体はもう不要なので削除
         h3.remove();
       });
