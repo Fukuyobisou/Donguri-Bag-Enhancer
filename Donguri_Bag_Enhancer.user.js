@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      8.13.19.1
+// @version      8.13.21.1
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
-// @contributor  ChatGPT (OpenAI, assistant)
+// @assistant    ChatGPT (OpenAI)
+// @contributor  "ID:YTtKPa4Z0"
 // @license      BSD-3-Clause license
 // @updateURL    https://github.com/Fukuyobisou/Donguri_Bag_Enhancer/raw/main/Donguri_Bag_Enhancer.user.js
 // @downloadURL  https://github.com/Fukuyobisou/Donguri_Bag_Enhancer/raw/main/Donguri_Bag_Enhancer.user.js
@@ -22,7 +23,7 @@
   // ============================================================
   // スクリプト自身のバージョン（About 表示用）
   // ============================================================
-  const DBE_VERSION    = '8.13.19.1';
+  const DBE_VERSION    = '8.13.21.1';
 
   // ============================================================
   // 多重起動ガード（同一ページで DBE が複数注入される事故を防ぐ）
@@ -703,6 +704,11 @@
       .sort-label {
         font-size: 0.8em;
         vertical-align: middle;
+      }
+
+      /* --- ネックレス「属性」列（DeBuff）：末尾文言を赤く（例: "...% 減速した"） --- */
+      .dbe-nec-debuff {
+        color: red;
       }
 
       /* --- 強制表示用：フィルターUI と バーガーメニュー --- */
@@ -7569,6 +7575,45 @@
     if (ov) ov.style.display = 'none';
   }
 
+  // --- ネックレス「属性」列：DeBuff（例: "...% 減速した"）の末尾だけ赤く ---
+  function dbeApplyNecklaceDebuffColoring(table){
+    try{
+      if (!table || table.id !== 'necklaceTable' || !table.tHead || !table.tBodies || !table.tBodies[0]) return;
+
+      const hdrs = table.tHead.rows[0].cells;
+      const attrIdx = Array.from(hdrs).findIndex(th=>th.classList.contains(columnIds['necklaceTable']['属性']));
+      if (attrIdx < 0) return;
+
+      Array.from(table.tBodies[0].rows).forEach(row=>{
+        const cell = row.cells[attrIdx];
+        if (!cell) return;
+
+        cell.querySelectorAll('ul:not([id]) > li').forEach(li=>{
+          // すでに加工済みならスキップ（重複加工防止）
+          if (li.querySelector('span.dbe-nec-debuff')) return;
+
+          const raw = (li.textContent || '').trim();
+          const parts = raw.split('% ');
+          if (parts.length < 2) return;
+
+          // Buff（[SPD+] 等）は着色しない（DeBuff のみ）
+          if (parts[0].includes('+]')) return;
+
+          const head = parts[0] + '% ';
+          const tail = parts.slice(1).join('% ').trim();
+          if (!tail) return;
+
+          li.textContent = '';
+          li.appendChild(document.createTextNode(head));
+          const sp = document.createElement('span');
+          sp.className = 'dbe-nec-debuff';
+          sp.textContent = tail;
+          li.appendChild(sp);
+        });
+      });
+    }catch(_){}
+  }
+
   // --- [錠]/[解錠]セル背景色を適用 ---
   function applyCellColors(){
     const unlockedColor = readStr('unlockedColor');
@@ -7594,6 +7639,10 @@
         const a = cell.querySelector('a');
         if (a) a.style.color = txt;
       });
+
+      // ネックレス「属性」列：DeBuff末尾テキストを赤く
+      if (id === 'necklaceTable') { try{ dbeApplyNecklaceDebuffColoring(table); }catch(_){} }
+
     });
   }
 
@@ -8286,8 +8335,26 @@
       table.addEventListener('click', async e=>{
         const a = e.target.closest('a[href*="/lock/"],a[href*="/unlock/"]');
         if (!a) return;
-        const td = a.closest(`td.${colMap['解']}`);
+        const td = a.closest('td');
         if (!td) return;
+        const tr = td.closest('tr');
+        if (!tr) return;
+        // 「名称列クリックで行を限定」等で class が失われた行でも動くように、
+        // 見出しテキストから現在の列indexを動的取得して「解」列クリックだけを捕捉する
+        const __getHdrIdx = (label)=>{
+          try{
+            const head = table.tHead && table.tHead.rows && table.tHead.rows[0];
+            if (!head) return -1;
+            const cells = head.cells || [];
+            for (let i=0;i<cells.length;i++){
+              if (((cells[i].textContent||'').trim()) === label) return i;
+            }
+          }catch(_){}
+          return -1;
+        };
+        const __lockIdxNow = __getHdrIdx('解');
+        const __tdIdxNow   = (tr && tr.cells) ? Array.prototype.indexOf.call(tr.cells, td) : -1;
+        if (__lockIdxNow >= 0 && __tdIdxNow >= 0 && __tdIdxNow !== __lockIdxNow) return;
         e.preventDefault();
         // クリック位置を記憶（後でスクロール復帰）
         try{ recordClickedCell(td, table); }catch(_){}
@@ -8297,14 +8364,21 @@
           // 1) 行の《装》セルから itemId を抽出（リンク書式に依存しない）
           let itemId = null;
           try{
-            const row = td.closest('tr');
-            const equpCell = (row && equpIdx>=0) ? row.cells[equpIdx] : null;
+            const __equpIdxNow = __getHdrIdx('装');
+            const equpCell = (tr && __equpIdxNow>=0) ? tr.cells[__equpIdxNow] : ((tr && equpIdx>=0) ? tr.cells[equpIdx] : null);
             if (typeof extractItemIdFromEqupCell === 'function'){
               itemId = extractItemIdFromEqupCell(equpCell);
             }
             if (!itemId && equpCell){
               const m = (equpCell.textContent||'').match(/(\d+)/);
               itemId = m ? m[1] : null;
+            }
+            // フォールバック：行内の /equip/<id> から抽出（列位置/class に依存しない）
+            if (!itemId && tr){
+              const eqA = tr.querySelector('a[href*="/equip/"]');
+              const href = eqA ? (eqA.getAttribute('href') || eqA.href || '') : '';
+              const mm = href.match(/\/equip\/(\d+)/);
+              itemId = mm ? mm[1] : null;
             }
           }catch(_){}
 
@@ -8352,8 +8426,17 @@
           if (!targetA){ hideOverlay(); location.href = a.href; return; }
           const targetB = targetA.closest('tr')?.cells?.[newRyclIdx] || null;
           td.innerHTML = targetA.innerHTML;
-          const ryTd = td.closest('tr').querySelector(`td.${colMap['分解']}`);
+          const __ryclIdxNow = __getHdrIdx('分解');
+          const ryTd = (__ryclIdxNow>=0 && tr && tr.cells) ? tr.cells[__ryclIdxNow] : (tr ? tr.querySelector(`td.${colMap['分解']}`) : null);
           if (ryTd) ryTd.innerHTML = targetB?.innerHTML || '';
+          // secured/released 属性を更新（色付け/マーカーの整合性）
+          try{
+            td.removeAttribute('secured'); td.removeAttribute('released');
+            const __a2 = td.querySelector('a[href]');
+            const __href2 = __a2 ? String(__a2.getAttribute('href')||__a2.href||'') : '';
+            if (__href2.includes('/lock/')) td.setAttribute('released','');
+            else if (__href2.includes('/unlock/')) td.setAttribute('secured','');
+          }catch(_){}
           // 再色付け
           applyCellColors();
         } catch(_err){
