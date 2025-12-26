@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      8.13.21.1
+// @version      8.14.0.0
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
 // @assistant    ChatGPT (OpenAI)
@@ -23,7 +23,7 @@
   // ============================================================
   // スクリプト自身のバージョン（About 表示用）
   // ============================================================
-  const DBE_VERSION    = '8.13.21.1';
+  const DBE_VERSION    = '8.14.0.0';
 
   // ============================================================
   // 多重起動ガード（同一ページで DBE が複数注入される事故を防ぐ）
@@ -4755,6 +4755,9 @@
         // ** 実ヘッダー表記が「WT.」であることを維持ください。
           const iSpd   = (kind==='wep') ? map['SPD']  : -1;
           const iWgt   = (kind==='amr') ? map['WT.']  : -1;
+          const iAtk   = (kind==='wep') ? map['ATK']  : -1;
+          const iDef   = (kind==='amr') ? map['DEF']  : -1;
+          const iCrit  = (kind==='wep' || kind==='amr') ? map['CRIT'] : -1;
 
           // ☆ どの列が必要かは、現在のカード内容から動的に決める
           //    可能な限り両方の保存先に対応（_rulesData / DBE_RULES）
@@ -4768,6 +4771,22 @@
           // 武器/防具の数値比較フラグ（SPD / WT.）
           const needSpd  = (kind==='wep') && rulesRaw.some(r => r && r.spd && String(r.spd.value ?? '') !== '');
           const needWgt  = (kind==='amr') && rulesRaw.some(r => r && r.wt  && String(r.wt.value  ?? '') !== '');
+          // 追加：武器 ATK(min/max) / 防具 DEF(min/max) / 武器・防具 CRIT
+          const needAtk  = (kind==='wep') && rulesRaw.some(r => {
+            const mn = r && r.minATK && String(r.minATK.value ?? '') !== '';
+            const mx = r && r.maxATK && String(r.maxATK.value ?? '') !== '';
+            return mn || mx;
+          });
+          const needDef  = (kind==='amr') && rulesRaw.some(r => {
+            const mn = r && r.minDEF && String(r.minDEF.value ?? '') !== '';
+            const mx = r && r.maxDEF && String(r.maxDEF.value ?? '') !== '';
+            return mn || mx;
+          });
+          const needCrit = (kind==='wep' || kind==='amr') && rulesRaw.some(r => {
+            const c = (r && (r.crit || r.CRIT));
+            if (!c) return false;
+            return String(c.value ?? '') !== '';
+          });
           // 分解ルールが1つでもあれば「分解」列を必須扱いにする
           const needRecycle = rulesRaw.some(r => r && r.type === 'del');
 
@@ -4795,6 +4814,9 @@
           if (needRar  && iRar < 0)              missing.push('Rarity/レアリティ');
           if (needSpd  && iSpd < 0)              missing.push('SPD');
           if (needWgt  && iWgt < 0)              missing.push('WT.');
+          if (needAtk  && iAtk < 0)              missing.push('ATK');
+          if (needDef  && iDef < 0)              missing.push('DEF');
+          if (needCrit && iCrit < 0)             missing.push('CRIT');
           if (kind==='nec' && (needProp || needBuff || needDebuff || needDelta) && iAttr < 0) missing.push('属性');
           if (missing.length > 0){
             // 重複除去
@@ -4813,8 +4835,8 @@
           }
 
           // ☆ 参考ログ（見つかった主な列のインデクス）
-          console.debug('[DBE] header indices: table=%s kind=%s name=%d equip(装)=%d unlock(解)=%d elem=%d mrm=%d rar=%d spd=%d wt.=%d',
-            table.id || '(no id)', kind, iName, iEqup, iLock, map['ELEM'] ?? -1, iMrm, iRar, iSpd, iWgt);
+          console.debug('[DBE] header indices: table=%s kind=%s name=%d equip(装)=%d unlock(解)=%d elem=%d mrm=%d rar=%d spd=%d wt.=%d atk=%d def=%d crit=%d',
+            table.id || '(no id)', kind, iName, iEqup, iLock, map['ELEM'] ?? -1, iMrm, iRar, iSpd, iWgt, iAtk, iDef, iCrit);
 
           // ☆ 追加：数値抽出ヘルパー（空や非数値は NaN になる＝判定時に不一致で落とす）
           const numFromCell = (td)=> {
@@ -4823,6 +4845,15 @@
           const v = t ? parseFloat(t) : NaN;
           return Number.isFinite(v) ? v : NaN;
         };
+
+          // ☆ 追加：範囲（min/max）抽出ヘルパー（ATK/DEF 用）
+          const rangeFromCell = (td)=>{
+            const nums = String(td?.textContent || '').match(/\d+/g);
+            if (!nums || !nums.length) return {min:NaN, max:NaN};
+            const a = parseInt(nums[0],10);
+            const b = (nums.length>1) ? parseInt(nums[1],10) : a;
+            return {min:(Number.isFinite(a)?a:NaN), max:(Number.isFinite(b)?b:NaN)};
+          };
 
         Array.from(table.tBodies[0].rows).forEach(tr=>{
 
@@ -4862,6 +4893,8 @@
             // 3) 見つからなければ「未特定」
             return '__unknown__';
           };
+          const atkR = (kind==='wep' && iAtk>=0) ? rangeFromCell(tr.cells[iAtk]) : null;
+          const defR = (kind==='amr' && iDef>=0) ? rangeFromCell(tr.cells[iDef]) : null;
           const rowInfo = {
             id,
             name : normalizeItemName(_rawName),
@@ -4869,9 +4902,14 @@
             mrm  : iMrm>=0 ? parseInt((tr.cells[iMrm]?.textContent||'0').replace(/[^\d]/g,''),10)||0 : 0,
             rar  : _rarHit,
             kind,
-            // ☆ 追加：行から SPD / WT. を数値抽出（なければ NaN）
+            // ☆ 追加：行から SPD / WT. / ATK / DEF / CRIT を数値抽出（なければ NaN）
             spd  : (kind==='wep' && iSpd>=0) ? numFromCell(tr.cells[iSpd]) : NaN,
-            wt   : (kind==='amr' && iWgt>=0) ? numFromCell(tr.cells[iWgt]) : NaN
+            wt   : (kind==='amr' && iWgt>=0) ? numFromCell(tr.cells[iWgt]) : NaN,
+            atkMin : atkR ? atkR.min : NaN,
+            atkMax : atkR ? atkR.max : NaN,
+            defMin : defR ? defR.min : NaN,
+            defMax : defR ? defR.max : NaN,
+            crit : ((kind==='wep' || kind==='amr') && iCrit>=0) ? numFromCell(tr.cells[iCrit]) : NaN
           };
           if (kind==='nec'){
             // ネックレス: グレード／Buff個数／DeBuff個数／増減（％合計）
@@ -4965,8 +5003,8 @@
     }
 
     // 〓〓〓 規則評価：最初に合致したルールの action を採用（上から順=「▲」の並び順） 〓〓〓
-    function decideAction(rowInfo){
-      // ネックレス：unknown（原則にない語）が含まれる場合は保留（施錠/分解しない）
+      function decideAction(rowInfo){
+        // rowInfo: {id,name,elem,mrm,rar,kind, spd, wt, atkMin, atkMax, defMin, defMax, crit, (nec: grade,buffCnt,debuffCnt,delta,unknown...) }
       if (rowInfo && rowInfo.kind==='nec' && rowInfo.hasUnknown) {
         return null;
       }
@@ -4999,7 +5037,7 @@
           if (r.mrm.border==='以上' && !(v>=th)) continue;
           if (r.mrm.border==='未満' && !(v<th)) continue;
         }
-        // ☆ 追加：武器→SPD、 防具→WT. の比較判定
+        // ☆ 追加：武器→SPD、防具→WT. の条件
         //  UI保存：wep なら r.spd = { value, border }, amr なら r.wt = { value, border }
         if (rowInfo.kind==='wep' && r.spd){
           const v  = rowInfo.spd;
@@ -5015,6 +5053,48 @@
           if (r.wt.border==='以上' && !(v>=th)) continue;
           if (r.wt.border==='未満' && !(v<th)) continue;
         }
+          // ☆ 追加：武器→minATK/maxATK
+          if (rowInfo.kind==='wep' && r.minATK){
+            const th = Number(String(r.minATK.value ?? '').replace(/[^\d.\-]/g,''));
+            const v  = rowInfo.atkMin;
+            if (!Number.isFinite(v) || !Number.isFinite(th)) continue;
+            if (r.minATK.border === '以上'){ if (!(v >= th)) continue; }
+            else if (r.minATK.border === '未満'){ if (!(v < th)) continue; }
+          }
+          if (rowInfo.kind==='wep' && r.maxATK){
+            const th = Number(String(r.maxATK.value ?? '').replace(/[^\d.\-]/g,''));
+            const v  = rowInfo.atkMax;
+            if (!Number.isFinite(v) || !Number.isFinite(th)) continue;
+            if (r.maxATK.border === '以上'){ if (!(v >= th)) continue; }
+            else if (r.maxATK.border === '未満'){ if (!(v < th)) continue; }
+          }
+          // ☆ 追加：防具→minDEF/maxDEF
+          if (rowInfo.kind==='amr' && r.minDEF){
+            const th = Number(String(r.minDEF.value ?? '').replace(/[^\d.\-]/g,''));
+            const v  = rowInfo.defMin;
+            if (!Number.isFinite(v) || !Number.isFinite(th)) continue;
+            if (r.minDEF.border === '以上'){ if (!(v >= th)) continue; }
+            else if (r.minDEF.border === '未満'){ if (!(v < th)) continue; }
+          }
+          if (rowInfo.kind==='amr' && r.maxDEF){
+            const th = Number(String(r.maxDEF.value ?? '').replace(/[^\d.\-]/g,''));
+            const v  = rowInfo.defMax;
+            if (!Number.isFinite(v) || !Number.isFinite(th)) continue;
+            if (r.maxDEF.border === '以上'){ if (!(v >= th)) continue; }
+            else if (r.maxDEF.border === '未満'){ if (!(v < th)) continue; }
+          }
+          // ☆ 追加：武器/防具→CRIT
+          {
+            const cr = (r.crit || r.CRIT);
+            if (cr){
+              const th = Number(String(cr.value ?? '').replace(/[^\d.\-]/g,''));
+              const v  = rowInfo.crit;
+              if (!Number.isFinite(v) || !Number.isFinite(th)) continue;
+              if (cr.border === '以上'){ if (!(v >= th)) continue; }
+              else if (cr.border === '未満'){ if (!(v < th)) continue; }
+            }
+          }
+
         // ☆ ネックレス専用：グレード / プロパティ数（Buff+DeBuff合計） / DeBuff個数 / 増減％
         if (rowInfo.kind==='nec'){
           if (r.grade && !r.grade.all){
@@ -6138,6 +6218,22 @@
           const wnd = statPretty('WT.', card.wt || card.WT || card['WT.']);
           if (wnd) chunks.push('／' + wrapParamHead(wnd));
         }
+        // 5-2) minATK/maxATK or minDEF/maxDEF / CRIT
+        if (kind==='wep'){
+          const mn = statPretty('minATK', card.minATK);
+          if (mn) chunks.push('／' + wrapParamHead(mn));
+          const mx = statPretty('maxATK', card.maxATK);
+          if (mx) chunks.push('／' + wrapParamHead(mx));
+        } else {
+          const mn = statPretty('minDEF', card.minDEF);
+          if (mn) chunks.push('／' + wrapParamHead(mn));
+          const mx = statPretty('maxDEF', card.maxDEF);
+          if (mx) chunks.push('／' + wrapParamHead(mx));
+        }
+        {
+          const cr = statPretty('CRIT', card.crit || card.CRIT);
+          if (cr) chunks.push('／' + wrapParamHead(cr));
+        }
         // 6) マリモ
         chunks.push('／' + wrapParamHead(marimoText(card.mrm)));
       } else {
@@ -6257,8 +6353,8 @@
       card.className = 'fc-card';
       // ── 重要：武器/防具タブ用の入力状態・要素参照を外側スコープに用意して、
       // ⑦「カードを追加」ハンドラ（ブロック外）からも参照できるようにする
-      let stateRarity, nameState, compState, elemState, mrmState;
-      let nameInput, compInput, compSel, compWrap, mrmInput, mrmSel, mrmWrap;
+      let stateRarity, nameState, compState, elemState, mrmState, minStatState, maxStatState, critState;
+      let nameInput, compInput, compSel, compWrap, mrmInput, mrmSel, mrmWrap, minStatInput, minStatSel, minStatWrap, maxStatInput, maxStatSel, maxStatWrap, critInput, critSel, critWrap;
       // ── セパレータ生成：外枠の境界色を拾って CSS 変数に流し込む
       function mkSep(){
         const s = document.createElement('div');
@@ -6418,6 +6514,101 @@
         sync();
         rightCol.appendChild(compWrap);
         addRow(leftCol,rightCol);
+      }
+
+      // ④-2 minATK/maxATK（武器） or minDEF/maxDEF（防具） / CRIT
+      minStatState = { all:false }; minStatInput = null; minStatSel = null; minStatWrap = null;
+      maxStatState = { all:false }; maxStatInput = null; maxStatSel = null; maxStatWrap = null;
+      critState    = { all:false }; critInput    = null; critSel    = null; critWrap    = null;
+      {
+        const labelMin = (kind==='wep') ? '《minATK》' : '《minDEF》';
+        const labelMax = (kind==='wep') ? '《maxATK》' : '《maxDEF》';
+        const idMin    = (kind==='wep') ? 'minATK' : 'minDEF';
+        const idMax    = (kind==='wep') ? 'maxATK' : 'maxDEF';
+
+        // minATK / minDEF
+        {
+          const leftCol  = mkLeft(labelMin);
+          const rightCol = mkRight();
+          const allWrap  = document.createElement('label');
+          allWrap.classList.add('fc-all-label');
+          Object.assign(allWrap.style,{ display:'inline-flex', alignItems:'center', gap:'0' });
+          const ckAll = document.createElement('input'); ckAll.type='checkbox'; ckAll.id=`fc-${kind}-${idMin}-all`;
+          const allTxt = document.createElement('span'); allTxt.textContent='すべて';
+          allWrap.htmlFor=ckAll.id; allWrap.append(ckAll, allTxt);
+          leftCol.appendChild(allWrap);
+
+          minStatWrap  = document.createElement('div'); minStatWrap.className='fc-inline';
+          minStatInput = document.createElement('input'); minStatInput.type='text'; minStatInput.className='fc-input'; minStatInput.style.width='5em';
+          minStatSel   = document.createElement('select'); minStatSel.className='fc-select';
+          ['以上','未満'].forEach(o=>{ const op=document.createElement('option'); op.value=o; op.textContent=o; minStatSel.append(op); });
+          Object.assign(minStatInput.style,{ height:'2em' });
+          Object.assign(minStatSel.style,{ height:'2em' });
+          minStatWrap.append(minStatInput, document.createTextNode(' '), minStatSel);
+
+          const sync = ()=>{ minStatState.all = ckAll.checked; setDimmed(minStatWrap, ckAll.checked); };
+          ckAll.addEventListener('change', sync);
+          sync();
+
+          rightCol.appendChild(minStatWrap);
+          addRow(leftCol,rightCol);
+        }
+
+        // maxATK / maxDEF
+        {
+          const leftCol  = mkLeft(labelMax);
+          const rightCol = mkRight();
+          const allWrap  = document.createElement('label');
+          allWrap.classList.add('fc-all-label');
+          Object.assign(allWrap.style,{ display:'inline-flex', alignItems:'center', gap:'0' });
+          const ckAll = document.createElement('input'); ckAll.type='checkbox'; ckAll.id=`fc-${kind}-${idMax}-all`;
+          const allTxt = document.createElement('span'); allTxt.textContent='すべて';
+          allWrap.htmlFor=ckAll.id; allWrap.append(ckAll, allTxt);
+          leftCol.appendChild(allWrap);
+
+          maxStatWrap  = document.createElement('div'); maxStatWrap.className='fc-inline';
+          maxStatInput = document.createElement('input'); maxStatInput.type='text'; maxStatInput.className='fc-input'; maxStatInput.style.width='5em';
+          maxStatSel   = document.createElement('select'); maxStatSel.className='fc-select';
+          ['以上','未満'].forEach(o=>{ const op=document.createElement('option'); op.value=o; op.textContent=o; maxStatSel.append(op); });
+          Object.assign(maxStatInput.style,{ height:'2em' });
+          Object.assign(maxStatSel.style,{ height:'2em' });
+          maxStatWrap.append(maxStatInput, document.createTextNode(' '), maxStatSel);
+
+          const sync = ()=>{ maxStatState.all = ckAll.checked; setDimmed(maxStatWrap, ckAll.checked); };
+          ckAll.addEventListener('change', sync);
+          sync();
+
+          rightCol.appendChild(maxStatWrap);
+          addRow(leftCol,rightCol);
+        }
+
+        // CRIT
+        {
+          const leftCol  = mkLeft('《CRIT》');
+          const rightCol = mkRight();
+          const allWrap  = document.createElement('label');
+          allWrap.classList.add('fc-all-label');
+          Object.assign(allWrap.style,{ display:'inline-flex', alignItems:'center', gap:'0' });
+          const ckAll = document.createElement('input'); ckAll.type='checkbox'; ckAll.id=`fc-${kind}-crit-all`;
+          const allTxt = document.createElement('span'); allTxt.textContent='すべて';
+          allWrap.htmlFor=ckAll.id; allWrap.append(ckAll, allTxt);
+          leftCol.appendChild(allWrap);
+
+          critWrap  = document.createElement('div'); critWrap.className='fc-inline';
+          critInput = document.createElement('input'); critInput.type='text'; critInput.className='fc-input'; critInput.style.width='5em';
+          critSel   = document.createElement('select'); critSel.className='fc-select';
+          ['以上','未満'].forEach(o=>{ const op=document.createElement('option'); op.value=o; op.textContent=o; critSel.append(op); });
+          Object.assign(critInput.style,{ height:'2em' });
+          Object.assign(critSel.style,{ height:'2em' });
+          critWrap.append(critInput, document.createTextNode(' '), critSel);
+
+          const sync = ()=>{ critState.all = ckAll.checked; setDimmed(critWrap, ckAll.checked); };
+          ckAll.addEventListener('change', sync);
+          sync();
+
+          rightCol.appendChild(critWrap);
+          addRow(leftCol,rightCol);
+        }
       }
 
       // ⑤ Element
@@ -6687,6 +6878,9 @@
             stateRarity.all=false; stateRarity.picks.clear();
             nameState.all=false; nameState.text='';
             compState.all=false;
+            if (minStatState) minStatState.all=false;
+            if (maxStatState) maxStatState.all=false;
+            if (critState)    critState.all=false;
             elemState.all=false; elemState.picks.clear();
             mrmState.all=false;
           }
@@ -6922,6 +7116,36 @@
             const v = (compInput.value||'').trim();
             const b = compSel.value||'';
             if (v && b) extra[ kind==='wep' ? 'spd' : 'wt' ] = { value:v, border:b };
+          }
+          // 追加：minATK/maxATK（武器） or minDEF/maxDEF（防具）
+          if (kind==='wep'){
+            if (minStatState && !minStatState.all){
+              const v = (minStatInput?.value||'').trim();
+              const b = (minStatSel?.value||'').trim();
+              if (v && b) extra.minATK = { value:v, border:b };
+            }
+            if (maxStatState && !maxStatState.all){
+              const v = (maxStatInput?.value||'').trim();
+              const b = (maxStatSel?.value||'').trim();
+              if (v && b) extra.maxATK = { value:v, border:b };
+            }
+          } else if (kind==='amr'){
+            if (minStatState && !minStatState.all){
+              const v = (minStatInput?.value||'').trim();
+              const b = (minStatSel?.value||'').trim();
+              if (v && b) extra.minDEF = { value:v, border:b };
+            }
+            if (maxStatState && !maxStatState.all){
+              const v = (maxStatInput?.value||'').trim();
+              const b = (maxStatSel?.value||'').trim();
+              if (v && b) extra.maxDEF = { value:v, border:b };
+            }
+          }
+          // 追加：CRIT（武器/防具）
+          if (critState && !critState.all){
+            const v = (critInput?.value||'').trim();
+            const b = (critSel?.value||'').trim();
+            if (v && b) extra.crit = { value:v, border:b };
           }
           let elmObj = { all:false, selected:[] };
           if (elemState.all){ elmObj = { all:true, selected:[] }; }
