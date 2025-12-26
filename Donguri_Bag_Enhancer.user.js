@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      8.14.0.0
+// @version      8.14.0.2
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
 // @assistant    ChatGPT (OpenAI)
@@ -23,7 +23,7 @@
   // ============================================================
   // スクリプト自身のバージョン（About 表示用）
   // ============================================================
-  const DBE_VERSION    = '8.14.0.0';
+  const DBE_VERSION    = '8.14.0.2';
 
   // ============================================================
   // 多重起動ガード（同一ページで DBE が複数注入される事故を防ぐ）
@@ -3697,8 +3697,10 @@
           type: 'dbe-filter-cards',
           version: '1',
           exported_at: new Date().toISOString(),
+          dbe_version: DBE_VERSION,
           data: dbeGetAllFilterCards()
         };
+
         const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
         const pad = n=> String(n).padStart(2,'0');
         const d = new Date();
@@ -3750,9 +3752,30 @@
     function dbeImportFilterCards(file, mode){ // mode: 'overwrite' | 'append'
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = ()=>{
+      reader.onload = async ()=>{
         try{
           const raw = JSON.parse(String(reader.result||'{}'));
+
+          // ★ 追加：エクスポート元DBEバージョンが現在より新しい場合は警告（続行/キャンセル）
+          try{
+            const exportedVer =
+              (raw && typeof raw==='object' && raw.type==='dbe-filter-cards')
+                ? (raw.dbe_version || raw.dbeVersion || raw.DBE_VERSION || raw.exported_dbe_version || null)
+                : null;
+            if (exportedVer && dbeCompareVersion(DBE_VERSION, exportedVer) < 0){
+              const msg = [
+                `このファイルは DBE v${exportedVer} でエクスポートされています。`,
+                `現在ご使用の DBE は v${DBE_VERSION} のため、より古いです。`,
+                'このままインポートすると、新しい項目が正しく反映されない恐れがあります。',
+                'DBE を更新してからインポートすることを推奨します。',
+                '',
+                'このままインポートを続行しますか？'
+              ].join('\n');
+              const ok = await dbeConfirmAlert('警告', msg, '続行', 'キャンセル');
+              if (!ok) return;
+            }
+          }catch(_){}
+
           const data = raw && raw.type==='dbe-filter-cards' && raw.data ? dbeNormalizeCardsShape(raw.data) : dbeNormalizeCardsShape(raw);
           const cur  = dbeGetAllFilterCards();
           let next;
