@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      8.14.0.2
+// @version      8.14.0.3
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
 // @assistant    ChatGPT (OpenAI)
@@ -23,7 +23,7 @@
   // ============================================================
   // スクリプト自身のバージョン（About 表示用）
   // ============================================================
-  const DBE_VERSION    = '8.14.0.2';
+  const DBE_VERSION    = '8.14.0.3';
 
   // ============================================================
   // 多重起動ガード（同一ページで DBE が複数注入される事故を防ぐ）
@@ -2008,6 +2008,28 @@
         wnd.style.display='none';
         try{ dbeHideOverlay(); }catch(_){}
         chestDiag('progressUI: close clicked');
+        // ▼ 念のため：停止後に内部状態が残っても次回実行を阻害しないよう、ここでも解放しておく
+        //   （ng<>too fast 等で handleServerErrorAndStopFlow が動いたケースの保険）
+        try{
+          const DBE_CHEST = (window.DBE_CHEST = window.DBE_CHEST || {});
+          // 進行タイマー停止
+          clearInterval(DBE_CHEST._progressTimer); DBE_CHEST._progressTimer = null;
+          // HUD停止
+          try{ if (typeof stopProgressHud === 'function') stopProgressHud(); }catch(_){}
+          // 列表示状態を復元（強制ONの解除）
+          try{ __dbeRestoreColsAfterRun(); }catch(_){}
+          // ループ/実行中フラグの解放
+          DBE_CHEST.left         = 0;
+          DBE_CHEST.unlimited    = false;
+          DBE_CHEST._autoRunning = false;
+          DBE_CHEST.didWork      = false;
+          DBE_CHEST.stage        = 'idle';
+          DBE_CHEST.busy         = false;
+          // 次回実行で lootObserver が再アタッチできるように
+          DBE_CHEST._lootObserved = false;
+          // エラー状態もクリア（次回 start で再初期化されるが、残留防止）
+          DBE_CHEST._serverError = false;
+        }catch(_){}
         // ユーザー閉鎖フラグは少し後で解除（再オープン時の誤判定を避ける）
         setTimeout(()=>{ try{ (window.DBE_CHEST = window.DBE_CHEST || {})._userClosing = false; }catch(_){} }, 0);
         // ▼ ハードリロードの実行タイミングを「閉じる」押下時に集約
@@ -3098,6 +3120,21 @@
       // 5) ChestProgressUI は開いたままにする（終了処理は呼ばない）
       // 6) 進行用オーバーレイはここで解除（サーバーエラー時は処理停止のため）
       try{ dbeHideOverlay(); }catch(_){}
+      // 6.5) ★重要★ 内部状態を完全停止（busy解除など）
+      //      サーバーエラー停止後でも、ページリロード無しで再度「宝箱の自動開封」を開始できるようにする
+      try{
+        DBE_CHEST._autoRunning  = false;
+        DBE_CHEST.didWork       = false;   // 誤って finishChest が呼ばれてもハードリロードしない
+        DBE_CHEST.stage         = 'idle';
+        DBE_CHEST.busy          = false;
+        DBE_CHEST._lootObserved = false;   // 次回実行で lootObserver を再アタッチ可能に
+      }catch(_){}
+      // 進行UIタイマーを止め、閉じるを有効化（ウインドウ自体は自動で閉じない）
+      try{ if (typeof dbeFinishProgressUI === 'function') dbeFinishProgressUI(); }catch(_){}
+      // HUD停止
+      try{ if (typeof stopProgressHud === 'function') stopProgressHud(); }catch(_){}
+      // ★ 自動で OFF → ON と切り替えた列表示状態を元に戻す
+      try{ __dbeRestoreColsAfterRun(); }catch(_){}
     }finally{
       // 7) アラート提示（OK を押すまで閉じない。×は隠している）
       showServerErrorDialog(messageText);
