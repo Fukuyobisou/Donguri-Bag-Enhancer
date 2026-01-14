@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      8.14.0.5
+// @version      8.14.0.10
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
 // @assistant    ChatGPT (OpenAI)
@@ -310,6 +310,8 @@
     ['雹嵐チャクラム',             { kana:'ヒョウランチャクラム',         limited:true  }],
     ['真夜中氷河ランタン',         { kana:'マヨナカヒョウガランタン',     limited:true  }],
     ['凍傷スリング',               { kana:'トウショウスリング',           limited:true  }],
+    ['花火R',                      { kana:'ハナビR',                      limited:true  }],
+    ['うちわR',                    { kana:'ウチワR',                      limited:true  }],
   ]);
   // レジストリ（常設防具）
   const armorRegistry = new Map([
@@ -1818,6 +1820,34 @@
   // 〓〓〓 Z-Index 前面制御（共通ユーティリティ） 〓〓〓
   //   - 新規に前面化が必要なときは dbeBringToFront(wnd) を呼ぶ
   //   - __DBE_Z_NEXT はグローバルな採番カウンタ
+  function dbeIsWindowVisible(el){
+    try{
+      if (!el) return false;
+      const cs = getComputedStyle(el);
+      return !!cs && cs.display !== 'none' && cs.visibility !== 'hidden';
+    }catch(_){
+      return false;
+    }
+  }
+  // dbe-W-Chest と dbe-W-ChestProgress が同時表示中は、常に Progress を前面に保つ
+  function dbeEnsureChestProgressOnTop(){
+    try{
+      const chest = document.getElementById('dbe-W-Chest');
+      const prog  = document.getElementById('dbe-W-ChestProgress');
+      if (!chest || !prog) return;
+      if (!dbeIsWindowVisible(chest) || !dbeIsWindowVisible(prog)) return;
+
+      const zChest = parseInt(getComputedStyle(chest).zIndex||'0',10);
+      const zProg  = parseInt(getComputedStyle(prog ).zIndex||'0',10);
+      if (!isNaN(zChest) && !isNaN(zProg) && zProg > zChest) return;
+
+      const z = ((window.__DBE_Z_NEXT = (window.__DBE_Z_NEXT||1000001) + 10));
+      window.__DBE_Z_WINDOW_MAX = Math.max(window.__DBE_Z_WINDOW_MAX||1000000, z);
+      prog.style.zIndex = String(z);
+      prog.dataset.dbeFronted = '1';
+      chestDiag('ensureChestProgressOnTop: fronted dbe-W-ChestProgress', '→ zIndex=', z);
+    }catch(_){}
+  }
   function dbeBringToFront(wnd){
     try{
       if (/^dbe-W-/.test(wnd.id||'')){
@@ -1831,6 +1861,8 @@
         dbeBringDialogToFront(wnd);
       }
     }catch(_){}
+    // 例外ルール：宝箱ウィンドウより進行ウィンドウを常に前面へ
+    try{ dbeEnsureChestProgressOnTop(); }catch(_){}
   }
 
   // 〓〓〓 《dbe-W-*》の表示切替を監視して自動前面化 〓〓〓
@@ -4240,6 +4272,13 @@
             oldEl.replaceWith(newEl.cloneNode(true));
           }
         }
+        // ★重要：
+        // patchBagFromDoc は table 要素そのものを置き換えるため、
+        // initLockToggle/initRecycle が付与していた click リスナーが失われる。
+        // 宝箱自動開封の終了後でも /unlock /lock /recycle のリロード抑止が効くように再配線する。
+        try{ initLockToggle(); }catch(_){}
+        try{ initRecycle(); }catch(_){}
+        try{ applyCellColors(); }catch(_){}
       }catch(err){
         console.error('[DBE] patchBagFromDoc error:', err);
       }
@@ -4399,6 +4438,23 @@
       dbeLogOnlyNewHighLootOnce();
     }
 
+    // ──────────────────────────────────────────────────────────
+    //  背景タブ/非アクティブ時でも宝箱処理を止めないための “次フレーム” ヘルパ
+    //   - requestAnimationFrame は非表示タブで停止/極端に間引かれることがある
+    //   - その場合は setTimeout(0) にフォールバックしてフロー継続
+    // ──────────────────────────────────────────────────────────
+    function dbeChestNextFrame(fn){
+      try{
+        const vis = (typeof document !== 'undefined' && document.visibilityState) ? document.visibilityState : 'visible';
+        if (vis === 'visible' && typeof requestAnimationFrame === 'function'){
+          requestAnimationFrame(fn);
+        } else {
+          setTimeout(fn, 0);
+        }
+      }catch(_){
+        setTimeout(fn, 0);
+      }
+    }
 
     function onBgFrameLoad(){
       const DBE_CHEST = (window.DBE_CHEST = window.DBE_CHEST || {});
@@ -4461,7 +4517,7 @@
             // 読み取り（キュー構築に必要な情報はなるべくここで収集）
             // ※ buildLockQueuesAfterOpen は読む→書くが混在しやすいので、先に読む処理へ寄せられるなら寄せる
             // 書き込みは rAF でフレーム境界に回す
-            requestAnimationFrame(()=>{
+            dbeChestNextFrame(()=>{
               if (DBE_CHEST.liveDom){ patchBagFromDoc(doc); } // 書き込み
               // ② onhold ロック＋ ルールでロック／分解対象をキュー化（可視DOMを基準に組み立て）
               buildLockQueuesAfterOpen(targetDoc);            // 読み→一部書きがあっても同一フレームで完結
@@ -4728,9 +4784,9 @@
     // 〓〓〓 宝箱を連続開封し、選別して施錠or分解or保留する 〓〓〓
     function buildLockQueuesAfterOpen(doc){
 
-      // 宝箱の開封間隔：三角分布（最小0秒, 最頻0.1秒, 最大0.3秒）
+      // 宝箱の開封間隔：三角分布（最小0.1秒, 最頻0.2秒, 最大0.4秒）
       DBE_CHEST.delay = ()=> {
-        const min = 0, mode = 0.1, max = 0.3;
+        const min = 0.1, mode = 0.2, max = 0.4;
         const u = Math.random();
         const c = (mode - min) / (max - min);
         let x;
@@ -8595,6 +8651,12 @@
     tableIds.forEach(id=>{
       const table = document.getElementById(id);
       if (!table || !table.tHead) return;
+      // ★二重配線防止（patchBagFromDoc 後に再実行されるため）
+      try{
+        if (table.dataset && table.dataset.dbeLockToggleInit === '1') return;
+        if (table.dataset) table.dataset.dbeLockToggleInit = '1';
+      }catch(_){}
+
       const colMap = columnIds[id];
       const hdrs   = Array.from(table.tHead.rows[0].cells);
       let lockIdx=-1,ryclIdx=-1,equpIdx=-1;
@@ -8751,6 +8813,12 @@
     tableIds.forEach(id=>{
       const table = document.getElementById(id);
       if (!table) return;
+      // ★二重配線防止（patchBagFromDoc 後に再実行されるため）
+      try{
+        if (table.dataset && table.dataset.dbeRecycleInit === '1') return;
+        if (table.dataset) table.dataset.dbeRecycleInit = '1';
+      }catch(_){}
+
       table.addEventListener('click', async e=>{
         const a = e.target.closest('a[href*="/recycle/"]');
         if (!a) return;
@@ -9874,26 +9942,72 @@
         }, {passive:false});
       }
 
-      function multiSort(order){
-        const rows=Array.from(table.tBodies[0].rows).filter(r=>r.style.display!=='none');
+      // ELEM列：Element（火/氷/雷/風/地/水/光/闇/なし）→ 数値（大→小）でソート
+      // ※Element「なし」は直前の並び（直前ソート結果）を維持（相対順序を変えない）
+      // ※クリックの昇順/逆順は「Element順のみ」を反転し、数値順（大→小）は固定
+      function sortByElemHeader(ascElemOrder){
+        const rows = Array.from(table.tBodies[0].rows).filter(r=>r.style.display!=='none');
+
+        // 「なし」の相対順序を確実に維持するため、現在表示順を退避（安定ソート用）
+        const prevIndex = new Map();
+        rows.forEach((r,i)=>prevIndex.set(r,i));
+
+        // Element順（昇順の基準）
+        const elemSeq = ['火','氷','雷','風','地','水','光','闇','なし'];
+        const rankOf = (elem)=>{
+          const k = elemSeq.indexOf(elem);
+          return (k >= 0) ? k : elemSeq.length;
+        };
+
+        // ELEMセルから {elem, num} を抽出
+        function parseElemCellText(text){
+          const t = (text || '').trim();
+          if (!t || t === 'なし') return { elem:'なし', num:null };
+
+          // 例: "25風" / "54氷"
+          let m = t.match(/^\s*(\d+)\s*([火氷雷風地水光闇])\s*$/);
+          if (m) return { elem:m[2], num:(parseInt(m[1],10) || 0) };
+
+          // 念のためのフォールバック（数字＋属性がどこかに含まれている場合）
+          m = t.match(/(\d+)\s*([火氷雷風地水光闇])/);
+          if (m) return { elem:m[2], num:(parseInt(m[1],10) || 0) };
+
+          // 属性だけが入っている場合は数値0扱い（通常は来ない想定）
+          m = t.match(/([火氷雷風地水光闇])/);
+          if (m) return { elem:m[1], num:0 };
+
+          return { elem:'なし', num:null };
+        }
+
         rows.sort((a,b)=>{
-          // 名称セルからレアリティを抽出
-          const ra = dbePickRarityFromText(a.cells[nameCol].textContent) || 'N';
-          const rb = dbePickRarityFromText(b.cells[nameCol].textContent) || 'N';
-          let d=order?rarityOrder[ra]-rarityOrder[rb]:rarityOrder[rb]-rarityOrder[ra];
-          if(d) return d;
-          const ea=a.cells[elemCol].textContent.replace(/[0-9]/g,'').trim()||'なし';
-          const eb=b.cells[elemCol].textContent.replace(/[0-9]/g,'').trim()||'なし';
-          d=order?elemOrder[ea]-elemOrder[eb]:elemOrder[eb]-elemOrder[ea];
-          if(d) return d;
-          const ma=parseInt(a.cells[mrimCol].textContent.replace(/[^0-9]/g,''),10)||0;
-          const mb=parseInt(b.cells[mrimCol].textContent.replace(/[^0-9]/g,''),10)||0;
-          return order?mb-ma:ma-mb;
+          const A = parseElemCellText(a.cells[elemCol]?.textContent);
+          const B = parseElemCellText(b.cells[elemCol]?.textContent);
+
+          // (1) Element順（クリックで昇順/逆順）
+          const ra = rankOf(A.elem);
+          const rb = rankOf(B.elem);
+          let d = ascElemOrder ? (ra - rb) : (rb - ra);
+          if (d) return d;
+
+          // (2) 同Element内：数値 大→小（固定）
+          // ただし Element「なし」は直前の並びを維持（＝相対順序を変えない）
+          if (A.elem === 'なし') {
+            return (prevIndex.get(a) ?? 0) - (prevIndex.get(b) ?? 0);
+          }
+
+          const na = (A.num == null) ? 0 : A.num;
+          const nb = (B.num == null) ? 0 : B.num;
+          d = (nb - na);
+          if (d) return d;
+
+          // 仕上げ：同値は直前の並びで安定化
+          return (prevIndex.get(a) ?? 0) - (prevIndex.get(b) ?? 0);
         });
+
         rows.forEach(r=>table.tBodies[0].appendChild(r));
       }
 
-      // ELEM列ヘッダークリック時はフィルターではなくマルチソートのみ実行
+      // ELEM列ヘッダークリック時はフィルターではなく ELEM 専用ソートのみ実行
       // ELEM列ソート用の状態を管理
       let elemState = 0; // 0=昇順, 1=降順
       hdrs[elemCol].style.cursor = 'pointer';
@@ -9901,13 +10015,14 @@
         // 既存のインジケーターを全列から削除
         headerRow.querySelectorAll('.sort-indicator, .sort-indicator-left').forEach(el => el.remove());
         // ソート実行
-        multiSort(elemState === 0);
+        const appliedState = elemState;
+        sortByElemHeader(appliedState === 0);
         // インジケーター更新
-        updateSortIndicator(hdrs[elemCol], elemState === 0 ? '⬆' : '⬇', 'right');
+        updateSortIndicator(hdrs[elemCol], appliedState === 0 ? '⬆' : '⬇', 'right');
         // ソート状態を保存
-        const lastState = elemState;
+        const lastState = appliedState;
         dbeRememberSort(id, () => {
-          multiSort(lastState === 0);
+          sortByElemHeader(lastState === 0);
           updateSortIndicator(hdrs[elemCol], lastState === 0 ? '⬆' : '⬇', 'right');
           applyColor(); scrollToAnchorCell();
         }, 'ELEM');
