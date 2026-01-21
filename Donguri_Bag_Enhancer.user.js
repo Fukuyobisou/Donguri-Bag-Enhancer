@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      8.15.1.25
+// @version      8.15.1.30
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       福呼び草
 // @assistant    ChatGPT (OpenAI)
@@ -23,7 +23,7 @@
   // ============================================================
   // スクリプト自身のバージョン（About 表示用）
   // ============================================================
-  const DBE_VERSION    = '8.15.1.25';
+  const DBE_VERSION    = '8.15.1.30';
 
   // ============================================================
   // 多重起動ガード（同一ページで DBE が複数注入される事故を防ぐ）
@@ -820,13 +820,13 @@
       /* ==== Rarity badges ==== */
       .rar-badge{
         display: inline-block;
-        min-width: 1.5em;
+        min-width: 3.5em;
         padding: 0 6px;
         border: 2px solid #666;
         border-radius: 6px;
-        font-size: 0.9em;
+        font-size: 1.1em;
         font-weight: 700;
-        line-height: 1.6;
+        line-height: 1.3em;
         margin-right: 1px;
         color: #FFF;
         text-align: center;
@@ -840,13 +840,13 @@
       /* ==== Logic badges (AND/OR) ==== */
       .logic-badge{
         display: inline-block;
-        min-width: 1.5em;
+        min-width: 3em;
         padding: 0 6px;
         border: 2px solid #666;
         border-radius: 6px;
-        font-size: 0.9em;
+        font-size: 1.1em;
         font-weight: 700;
-        line-height: 1.6;
+        line-height: 1.2em;
         margin-right: 1px;
         color: #FFF;
         text-align: center;
@@ -5170,9 +5170,10 @@
           // ─────────────────────────────────────────
           // 武器/防具：指定仕様（カードを上から順に1枚ずつ処理）
           // (1) まず《武器名/防具名》でフィルタ（該当しないなら以降スキップ＝保留）
-          // (2) 《動作モード》は r.type（lock/del）として現状維持
-          // (3) 《ロジック》AND/OR を反映（r.fop）
-          // (4) 7条件 {Rarity, SPD/WT, min, max, CRIT, Element, マリモ} を AND/OR 評価
+          // (2) 続いて《Rarity》でフィルタ（該当しないなら以降スキップ＝保留）
+          // (3) 《動作モード》は r.type（lock/del）として現状維持
+          // (4) 《ロジック》AND/OR を反映（r.fop）
+          // (5) 6条件 {SPD/WT, min, max, CRIT, Element, マリモ} を AND/OR 評価
           // ─────────────────────────────────────────
           if (rowInfo.kind==='wep' || rowInfo.kind==='amr'){
             // (1) 名前で先にフィルタ
@@ -5185,20 +5186,6 @@
               if (words.length && !words.some(wnd => lhs === wnd)) continue; // ← 名前不一致なら以降スキップ（保留）
             }
 
-            const op = String(r.fop || 'AND').toUpperCase();
-            const useOr = (op === 'OR');
-
-            let anyActive = false;
-            let anyMatch  = false;
-            let allMatch  = true;
-            const apply = (active, matched)=>{
-              if (!active) return;
-              anyActive = true;
-              if (matched) anyMatch = true;
-              else allMatch = false;
-            };
-
-            // ── Rarity（「すべて」は非アクティブ＝判定スキップ。配列/文字列/旧形式も救済）
             {
               let active = false;
               let matched = true;
@@ -5222,8 +5209,21 @@
                   matched = true;
                 }
               }
-              apply(active, matched);
+              // Rarity 不一致なら以降スキップ（保留）
+              if (active && !matched) continue;
             }
+
+            const op = String(r.fop || 'AND').toUpperCase();
+            const useOr = (op === 'OR');
+            let anyActive = false;
+            let anyMatch  = false;
+            let allMatch  = true;
+            const apply = (active, matched)=>{
+              if (!active) return;
+              anyActive = true;
+              if (matched) anyMatch = true;
+              else allMatch = false;
+            };
 
             // ── SPD（武器）/ WT.（防具） ※未指定（all）は extra に入らないので非アクティブ
             if (rowInfo.kind==='wep'){
@@ -6603,6 +6603,7 @@
       }
     }
 
+    // フィルタカード
     function renderCards(kind){
       areaTop.innerHTML = '';
       const list = (kind === 'wep')
@@ -6621,7 +6622,7 @@
         return;
       }
       list.forEach((card, idx)=>{
-        // 行コンテナ（3段：1段目=操作列 / 2段目=《武器名/防具名》 / 3段目=《ロジック》+7条件+【不問】）
+        // 行コンテナ（武器/防具=4段：1段目=操作列 / 2段目=《武器名/防具名》 / 3段目=《Rarity》 / 4段目=《ロジック》+7条件+【不問】。ネックレスは従来通り）
         const row = document.createElement('div');
         // 種別ごとに背景色を変える（CSS変数で制御）
         row.classList.add('dbe-filter-card-row', `dbe-filter-card-row--${kind}`);
@@ -6647,10 +6648,30 @@
         const badgeHTML  = (p>=0 ? html.slice(0, p) : html) || '';
         const paramsHTML = (p>=0 ? html.slice(p+1) : '') || '';
 
-        // params を「《武器名/防具名》」(2段目) と、それ以外(3段目) に分割
-        const q = paramsHTML.indexOf('／');
-        const nameHTML = (q>=0 ? paramsHTML.slice(0, q) : paramsHTML) || '';
-        const restHTML = (q>=0 ? paramsHTML.slice(q+1) : '') || '';
+        // params を「《武器名/防具名》」(2段目) / 《Rarity》(3段目) / それ以外(4段目) に分割（武器/防具のみ）
+        let nameHTML = '';
+        let rarityHTML = '';
+        let restHTML = '';
+        if (kind === 'wep' || kind === 'amr'){
+          const parts = (paramsHTML || '').split('／').filter(s=>s!=='' );
+          nameHTML = (parts.length ? parts[0] : '') || '';
+          const tail = parts.slice(1);
+          const rIdx = tail.findIndex(s => {
+            const t = String(s || '');
+            return t.includes('rar-badge');
+          });
+          if (rIdx >= 0){
+            rarityHTML = tail[rIdx] || '';
+            restHTML = tail.filter((_, i)=>i !== rIdx).join('／') || '';
+          }else{
+            restHTML = tail.join('／') || '';
+          }
+        }else{
+          // ネックレスは従来通り（2段目=名称 / 3段目=残り）
+          const q = paramsHTML.indexOf('／');
+          nameHTML = (q>=0 ? paramsHTML.slice(0, q) : paramsHTML) || '';
+          restHTML = (q>=0 ? paramsHTML.slice(q+1) : '') || '';
+        }
 
         // [1段目] 操作列：［通し番号＋上移動UI］ / 施錠or分解バッジ / 再編集 / 削除（概ね均等配置）
         const headRow = document.createElement('div');
@@ -6855,11 +6876,25 @@
         Object.assign(nameRow.style, { padding:'10px' });
         nameRow.innerHTML = nameHTML || '';
 
-        // [3段目] 《ロジック》バッジ、7条件、【不問】グループ
+        // [3段目] 《Rarity》（武器/防具のみ）
+        let rarityRow = null;
+        if (kind === 'wep' || kind === 'amr'){
+          if (rarityHTML){
+            rarityRow = document.createElement('div');
+            Object.assign(rarityRow.style, { padding:'10px' });
+            rarityRow.innerHTML = rarityHTML;
+          }
+        }
+
+        // [4段目] 《ロジック》バッジ、6条件、【不問】グループ
         const bodyRow = document.createElement('div');
         bodyRow.innerHTML = restHTML || '';
 
-        row.append(headRow, nameRow, bodyRow);
+        if (rarityRow){
+          row.append(headRow, nameRow, rarityRow, bodyRow);
+        }else{
+          row.append(headRow, nameRow, bodyRow);
+        }
         areaTop.appendChild(row);
       });
     }
@@ -6996,37 +7031,9 @@
         rightCol.appendChild(rightWrap);
         addRow(leftCol,rightCol);
       }
-      addSep('b');
-
-      // ③ ロジック（AND/OR）
-      // 初期状態：どちらも未選択（ユーザーが選んだ時点で AND/OR の排他が効く）
-      fopState = { op:null };
-      {
-        const leftCol = mkLeft('《ロジック》');
-        const rightCol = mkRight();
-        const gp = document.createElement('div');
-        Object.assign(gp.style,{ display:'flex', alignItems:'center' });
-        // AND
-        const lb1=document.createElement('label');
-        Object.assign(lb1.style,{ display:'inline-flex', alignItems:'center', gap:'0.1em', marginRight:'2em' });
-        const r1 = document.createElement('input'); r1.type='radio'; r1.name=`fc-fop-${kind}`; r1.id=`fc-${kind}-fop-and`;
-        const t1 = document.createElement('span'); t1.textContent='AND';
-        lb1.htmlFor=r1.id; lb1.append(r1,t1);
-        // OR
-        const lb2=document.createElement('label');
-        Object.assign(lb2.style,{ display:'inline-flex', alignItems:'center', gap:'0.2em' });
-        const r2 = document.createElement('input'); r2.type='radio'; r2.name=`fc-fop-${kind}`; r2.id=`fc-${kind}-fop-or`;
-        const t2 = document.createElement('span'); t2.textContent='OR';
-        lb2.htmlFor=r2.id; lb2.append(r2,t2);
-        r1.addEventListener('change', ()=>{ if (r1.checked) fopState.op = 'AND'; });
-        r2.addEventListener('change', ()=>{ if (r2.checked) fopState.op = 'OR';  });
-        gp.append(lb1,lb2);
-        rightCol.appendChild(gp);
-        addRow(leftCol,rightCol);
-      }
       addSep('a');
 
-      // ④ Rarity（v8.15.0.x で欠落していたため復活）
+      // ③ Rarity（v8.15.0.x で欠落していたため復活）
       stateRarity = { all:false, picks:new Set() };
       {
         const leftCol = mkLeft('《Rarity》');
@@ -7053,6 +7060,34 @@
         ckAll.addEventListener('change', sync);
         sync();
         rightCol.appendChild(rightWrap);
+        addRow(leftCol,rightCol);
+      }
+      addSep('b');
+
+      // ④ ロジック（AND/OR）
+      // 初期状態：どちらも未選択（ユーザーが選んだ時点で AND/OR の排他が効く）
+      fopState = { op:null };
+      {
+        const leftCol = mkLeft('《ロジック》');
+        const rightCol = mkRight();
+        const gp = document.createElement('div');
+        Object.assign(gp.style,{ display:'flex', alignItems:'center' });
+        // AND
+        const lb1=document.createElement('label');
+        Object.assign(lb1.style,{ display:'inline-flex', alignItems:'center', gap:'0.1em', marginRight:'2em' });
+        const r1 = document.createElement('input'); r1.type='radio'; r1.name=`fc-fop-${kind}`; r1.id=`fc-${kind}-fop-and`;
+        const t1 = document.createElement('span'); t1.textContent='AND';
+        lb1.htmlFor=r1.id; lb1.append(r1,t1);
+        // OR
+        const lb2=document.createElement('label');
+        Object.assign(lb2.style,{ display:'inline-flex', alignItems:'center', gap:'0.2em' });
+        const r2 = document.createElement('input'); r2.type='radio'; r2.name=`fc-fop-${kind}`; r2.id=`fc-${kind}-fop-or`;
+        const t2 = document.createElement('span'); t2.textContent='OR';
+        lb2.htmlFor=r2.id; lb2.append(r2,t2);
+        r1.addEventListener('change', ()=>{ if (r1.checked) fopState.op = 'AND'; });
+        r2.addEventListener('change', ()=>{ if (r2.checked) fopState.op = 'OR';  });
+        gp.append(lb1,lb2);
+        rightCol.appendChild(gp);
         addRow(leftCol,rightCol);
       }
       addSep('a');
@@ -7239,7 +7274,7 @@
         rightCol.appendChild(mrmWrap);
         addRow(leftCol,rightCol);
       }
-      addSep('a');
+      addSep('b');
     }
 
       // ────────────────
